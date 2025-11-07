@@ -33,6 +33,7 @@ interface Stats {
 }
 
 export default function Home() {
+  // Aggregated (hourly) data for charting
   const [data, setData] = useState<DataPoint[]>([]);
   const [currentCount, setCurrentCount] = useState<number>(0);
   const [lastUpdated, setLastUpdated] = useState<string>('');
@@ -45,35 +46,84 @@ export default function Home() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch data from Supabase
-        const { data: signupData, error } = await supabase
-          .from('signups')
-          .select('timestamp, count')
-          .order('timestamp', { ascending: true });
-        
-        if (error) {
-          console.error('Error fetching from Supabase:', error);
+        // Fetch all rows with pagination (Supabase response size limits)
+  const PAGE_SIZE = 1000; // use conservative page size to match API caps reliably
+        const allRows: { timestamp: string; count: number }[] = [];
+
+        // Probe whether the table has an auto-increment id; if so, prefer id-based keyset pagination
+        const idProbe = await supabase.from('signups').select('id').limit(1);
+        const hasId = !idProbe.error;
+
+        if (hasId) {
+          let lastId: number | null = null;
+          let safety = 0;
+          while (true) {
+            let query = supabase
+              .from('signups')
+              .select('id, timestamp, count')
+              .order('id', { ascending: true })
+              .limit(PAGE_SIZE);
+            if (lastId !== null) query = query.gt('id', lastId);
+            const { data: batch, error: batchError } = await query;
+            if (batchError) {
+              console.error('Error fetching batch (id keyset):', batchError);
+              break;
+            }
+            if (!batch || batch.length === 0) break;
+            for (const r of batch) {
+              allRows.push({ timestamp: r.timestamp, count: Number(r.count ?? 0) });
+            }
+            lastId = (batch[batch.length - 1] as unknown as { id: number }).id;
+            safety += 1;
+            if (safety > 100) { console.warn('Pagination safety break after 100 pages'); break; }
+          }
+        } else {
+          // Fallback to timestamp keyset pagination
+          let lastTs: string | null = null;
+          let safety = 0;
+          while (true) {
+            let query = supabase
+              .from('signups')
+              .select('timestamp, count')
+              .order('timestamp', { ascending: true })
+              .limit(PAGE_SIZE);
+            if (lastTs) query = query.gt('timestamp', lastTs);
+            const { data: batch, error: batchError } = await query;
+            if (batchError) {
+              console.error('Error fetching batch (timestamp keyset):', batchError);
+              break;
+            }
+            if (!batch || batch.length === 0) break;
+            for (const r of batch) {
+              allRows.push({ timestamp: r.timestamp, count: Number(r.count ?? 0) });
+            }
+            lastTs = batch[batch.length - 1].timestamp;
+            safety += 1;
+            if (safety > 100) { console.warn('Pagination safety break after 100 pages'); break; }
+          }
+        }
+
+        if (allRows.length === 0) {
+          console.error('No data returned from Supabase (after pagination)');
           setLoading(false);
           return;
         }
 
-        if (!signupData || signupData.length === 0) {
-          console.error('No data returned from Supabase');
-          setLoading(false);
-          return;
+        // Downsample to hourly points: pick the last (max timestamp) count in each hour (counts are cumulative)
+        const hourlyMap = new Map<number, number>();
+        for (const row of allRows) {
+          const d = new Date(row.timestamp);
+          d.setMinutes(0, 0, 0); // truncate to hour
+          hourlyMap.set(d.getTime(), row.count); // overwrite so last within hour wins
         }
+        const hourlyData: DataPoint[] = Array.from(hourlyMap.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([ts, count]) => ({ timestamp: new Date(ts).toISOString(), count }));
+        setData(hourlyData);
 
-        // Transform the data to match our DataPoint interface and coerce counts to numbers
-        const parsedData: DataPoint[] = signupData.map((item) => ({
-          timestamp: item.timestamp,
-          count: Number(item.count ?? 0)
-        }));
-
-        setData(parsedData);
-
-        // Get the latest count
-        if (parsedData.length > 0) {
-          const latest = parsedData[parsedData.length - 1];
+        // Latest raw (minute-level) entry for accuracy in currentCount & lastUpdated
+        if (allRows.length > 0) {
+          const latest = allRows[allRows.length - 1];
           setCurrentCount(latest.count);
 
           // Delay setting the count slightly to allow odometer to mount first
@@ -85,13 +135,20 @@ export default function Home() {
           const lastUpdateTime = new Date(latest.timestamp);
           const now = new Date();
           const diffMs = now.getTime() - lastUpdateTime.getTime();
-          const diffMins = Math.floor(diffMs / 60000);
+          const diffMins = Math.max(0, Math.floor(diffMs / 60000));
 
-          setLastUpdated(diffMins === 0 ? "< 1 min ago" : diffMins + "min ago");
+          // If more than a day, show days instead of minutes
+          if (diffMins >= 1440) {
+            const days = Math.floor(diffMins / 1440);
+            const dayLabel = days === 1 ? 'day' : 'days';
+            setLastUpdated(`Last updated: ${days} ${dayLabel} ago`);
+          } else {
+            setLastUpdated(diffMins === 0 ? '< 1 min ago' : `${diffMins} min ago`);
+          }
 
-            // Calculate statistics (average rate, last-24h growth, peak signups/hour, estimate)
-            if (parsedData.length > 1) {
-              const first = parsedData[0];
+            // Calculate statistics (average rate, last-24h growth, peak signups/hour, estimate) using raw data for precision
+            if (allRows.length > 1) {
+              const first = allRows[0];
               const timeDiff = lastUpdateTime.getTime() - new Date(first.timestamp).getTime();
               const hoursDiff = timeDiff / (1000 * 60 * 60);
               const signupDiff = latest.count - first.count;
@@ -101,7 +158,7 @@ export default function Home() {
               // This approach builds a time-sorted series and, for each sample time t, computes
               // the signups delta between t-1h and t by interpolating counts at the window edges.
               // It produces a more robust peak-hours estimate than using only consecutive-point rates.
-              const points = parsedData.map(p => ({
+              const points = allRows.map(p => ({
                 ts: new Date(p.timestamp).getTime(),
                 count: Number(p.count)
               }));
@@ -151,7 +208,7 @@ export default function Home() {
 
               // Calculate last 24 hours growth
               const oneDayAgo = now.getTime() - (24 * 60 * 60 * 1000);
-              const recentData = parsedData.filter(d => new Date(d.timestamp).getTime() >= oneDayAgo);
+              const recentData = allRows.filter(d => new Date(d.timestamp).getTime() >= oneDayAgo);
               const lastDayGrowth = recentData.length > 1
                 ? recentData[recentData.length - 1].count - recentData[0].count
                 : 0;
@@ -405,7 +462,7 @@ export default function Home() {
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-4xl font-bold text-green-800 dark:text-green-200">Goal reached</h2>
-                  <p className="mt-2 text-xl text-green-700 dark:text-green-100">Moonshot will be launching soon!</p>
+                  <p className="mt-2 text-xl text-green-700 dark:text-green-100">Moonshot has launched!</p>
                 </div>
               </div>
             </div>
@@ -438,7 +495,7 @@ export default function Home() {
 
                 <div className="pt-8 border-t border-gray-200 dark:border-gray-700">
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {loading ? <Skeleton width={200}/> : "Updated " + lastUpdated}
+                    {loading ? <Skeleton width={200}/> : (lastUpdated.startsWith('Last updated:') ? lastUpdated : `Updated ${lastUpdated}`)}
                   </p>
                 </div>
               </div>
