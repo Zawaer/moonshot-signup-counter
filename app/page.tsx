@@ -7,12 +7,11 @@ import { createClient } from '@supabase/supabase-js';
 import Skeleton, { SkeletonTheme } from 'react-loading-skeleton';
 import 'react-loading-skeleton/dist/skeleton.css'
 
-// Initialize Supabase client
+// init supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// Because Odometer.js requires document object, load it dynamically (client-side only)
 const Odometer = dynamic(() => import('react-odometerjs'), { 
   ssr: false, 
   loading: () => <span className="odometer">0</span> 
@@ -33,7 +32,6 @@ interface Stats {
 }
 
 export default function Home() {
-  // Aggregated (hourly) data for charting
   const [data, setData] = useState<DataPoint[]>([]);
   const [currentCount, setCurrentCount] = useState<number>(0);
   const [lastUpdated, setLastUpdated] = useState<string>('');
@@ -46,119 +44,62 @@ export default function Home() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch all rows with pagination (Supabase response size limits)
-  const PAGE_SIZE = 1000; // use conservative page size to match API caps reliably
-        const allRows: { timestamp: string; count: number }[] = [];
-
-        // Probe whether the table has an auto-increment id; if so, prefer id-based keyset pagination
-        const idProbe = await supabase.from('signups').select('id').limit(1);
-        const hasId = !idProbe.error;
-
-        if (hasId) {
-          let lastId: number | null = null;
-          let safety = 0;
-          while (true) {
-            let query = supabase
-              .from('signups')
-              .select('id, timestamp, count')
-              .order('id', { ascending: true })
-              .limit(PAGE_SIZE);
-            if (lastId !== null) query = query.gt('id', lastId);
-            const { data: batch, error: batchError } = await query;
-            if (batchError) {
-              console.error('Error fetching batch (id keyset):', batchError);
-              break;
-            }
-            if (!batch || batch.length === 0) break;
-            for (const r of batch) {
-              allRows.push({ timestamp: r.timestamp, count: Number(r.count ?? 0) });
-            }
-            lastId = (batch[batch.length - 1] as unknown as { id: number }).id;
-            safety += 1;
-            if (safety > 100) { console.warn('Pagination safety break after 100 pages'); break; }
-          }
-        } else {
-          // Fallback to timestamp keyset pagination
-          let lastTs: string | null = null;
-          let safety = 0;
-          while (true) {
-            let query = supabase
-              .from('signups')
-              .select('timestamp, count')
-              .order('timestamp', { ascending: true })
-              .limit(PAGE_SIZE);
-            if (lastTs) query = query.gt('timestamp', lastTs);
-            const { data: batch, error: batchError } = await query;
-            if (batchError) {
-              console.error('Error fetching batch (timestamp keyset):', batchError);
-              break;
-            }
-            if (!batch || batch.length === 0) break;
-            for (const r of batch) {
-              allRows.push({ timestamp: r.timestamp, count: Number(r.count ?? 0) });
-            }
-            lastTs = batch[batch.length - 1].timestamp;
-            safety += 1;
-            if (safety > 100) { console.warn('Pagination safety break after 100 pages'); break; }
-          }
-        }
-
-        if (allRows.length === 0) {
-          console.error('No data returned from Supabase (after pagination)');
+        // fetch data from Supabase
+        const { data: signupData, error } = await supabase
+          .from('signups')
+          .select('timestamp, count')
+          .order('timestamp', { ascending: true });
+        
+        if (error) {
+          console.error('Error fetching from Supabase:', error);
           setLoading(false);
           return;
         }
 
-        // Downsample to hourly points: pick the last (max timestamp) count in each hour (counts are cumulative)
-        const hourlyMap = new Map<number, number>();
-        for (const row of allRows) {
-          const d = new Date(row.timestamp);
-          d.setMinutes(0, 0, 0); // truncate to hour
-          hourlyMap.set(d.getTime(), row.count); // overwrite so last within hour wins
+        if (!signupData || signupData.length === 0) {
+          console.error('No data returned from Supabase');
+          setLoading(false);
+          return;
         }
-        const hourlyData: DataPoint[] = Array.from(hourlyMap.entries())
-          .sort((a, b) => a[0] - b[0])
-          .map(([ts, count]) => ({ timestamp: new Date(ts).toISOString(), count }));
-        setData(hourlyData);
 
-        // Latest raw (minute-level) entry for accuracy in currentCount & lastUpdated
-        if (allRows.length > 0) {
-          const latest = allRows[allRows.length - 1];
+        const parsedData: DataPoint[] = signupData.map((item) => ({
+          timestamp: item.timestamp,
+          count: Number(item.count ?? 0)
+        }));
+
+        setData(parsedData);
+
+        if (parsedData.length > 0) {
+          const latest = parsedData[parsedData.length - 1];
           setCurrentCount(latest.count);
 
-          // Delay setting the count slightly to allow odometer to mount first
+          // delay setting the count slightly to allow odometer to mount first
           setTimeout(() => {
             setCurrentCount(latest.count);
           }, 300);
 
-          // Calculate time difference
           const lastUpdateTime = new Date(latest.timestamp);
           const now = new Date();
           const diffMs = now.getTime() - lastUpdateTime.getTime();
           const diffMins = Math.max(0, Math.floor(diffMs / 60000));
 
-          // If more than a day, show days instead of minutes
           if (diffMins >= 1440) {
             const days = Math.floor(diffMins / 1440);
             const dayLabel = days === 1 ? 'day' : 'days';
-            setLastUpdated(`Last updated: ${days} ${dayLabel} ago`);
+            setLastUpdated(`${days} ${dayLabel} ago`);
           } else {
             setLastUpdated(diffMins === 0 ? '< 1 min ago' : `${diffMins} min ago`);
           }
 
-            // Calculate statistics (average rate, last-24h growth, peak signups/hour, estimate) using raw data for precision
-            if (allRows.length > 1) {
-              const first = allRows[0];
+            if (parsedData.length > 1) {
+              const first = parsedData[0];
               const timeDiff = lastUpdateTime.getTime() - new Date(first.timestamp).getTime();
               const hoursDiff = timeDiff / (1000 * 60 * 60);
               const signupDiff = latest.count - first.count;
               const avgPerHour = signupDiff / Math.max(hoursDiff, 1e-6);
 
-              // Compute peak signups per hour using a sliding 1-hour window.
-              // This approach builds a time-sorted series and, for each sample time t, computes
-              // the signups delta between t-1h and t by interpolating counts at the window edges.
-              // It produces a more robust peak-hours estimate than using only consecutive-point rates.
-              const points = allRows.map(p => ({
+              // calculate peak signups per hour in a 1-hour time window
+              const points = parsedData.map(p => ({
                 ts: new Date(p.timestamp).getTime(),
                 count: Number(p.count)
               }));
@@ -166,13 +107,10 @@ export default function Home() {
               const peakHourly = (() => {
                 if (points.length < 2) return 0;
 
-                // Helper to interpolate count at arbitrary timestamp using surrounding points
                 const interpCount = (t: number) => {
-                  // If before first or after last, clamp to endpoint values
                   if (t <= points[0].ts) return points[0].count;
                   if (t >= points[points.length - 1].ts) return points[points.length - 1].count;
 
-                  // Binary search for right index
                   let lo = 0;
                   let hi = points.length - 1;
                   while (lo <= hi) {
@@ -192,28 +130,27 @@ export default function Home() {
                 let maxPerHour = 0;
                 const oneHourMs = 60 * 60 * 1000;
 
-                // Evaluate the window ending at each actual sample timestamp (that's sufficient)
                 for (let i = 0; i < points.length; i++) {
                   const t = points[i].ts;
                   const t0 = t - oneHourMs;
                   const cT = interpCount(t);
                   const cT0 = interpCount(t0);
                   const delta = cT - cT0;
-                  const perHour = delta; // since window is 1 hour, delta is per-hour
+                  const perHour = delta;
                   if (perHour > maxPerHour) maxPerHour = perHour;
                 }
 
                 return Math.max(0, maxPerHour);
               })();
 
-              // Calculate last 24 hours growth
+              // calculate last 24h growth
               const oneDayAgo = now.getTime() - (24 * 60 * 60 * 1000);
-              const recentData = allRows.filter(d => new Date(d.timestamp).getTime() >= oneDayAgo);
+              const recentData = parsedData.filter(d => new Date(d.timestamp).getTime() >= oneDayAgo);
               const lastDayGrowth = recentData.length > 1
                 ? recentData[recentData.length - 1].count - recentData[0].count
                 : 0;
 
-              // Estimate completion date
+              // estimated completion date
               const remaining = TARGET_SIGNUPS - latest.count;
               let estimatedCompletion = null;
               let daysRemaining = 0;
@@ -243,13 +180,13 @@ export default function Home() {
     };
 
     fetchData();
-    // Refresh every minute
+    // refresh every min
     const interval = setInterval(fetchData, 60000);
 
     return () => clearInterval(interval);
   }, []);
 
-  // Realtime subscription: update currentCount when signups table changes
+  // update current count in realtime when signups table changes
   useEffect(() => {
     const channel = supabase
       .channel('public:signups')
@@ -268,7 +205,7 @@ export default function Home() {
               setLastUpdated('< 1 min ago');
             }
           } catch {
-            // Ignore malformed payloads
+            // just ignore
           }
         }
       );
@@ -301,7 +238,7 @@ export default function Home() {
 
   const percentage = TARGET_SIGNUPS > 0 ? (currentCount / TARGET_SIGNUPS) * 100 : 0;
 
-  // Filter data based on time range
+  // filter data based on time range
   const getFilteredData = () => {
     if (timeRange === 'all') return data;
 
@@ -323,9 +260,6 @@ export default function Home() {
 
   const filteredData = getFilteredData();
 
-  // Resample into regular time buckets but only place a point if there is actual data
-  // in that bucket; otherwise leave the bucket empty (count === null). This prevents
-  // creating fake points in gaps and lets the chart show gaps.
   const resampleTimeSeries = (points: DataPoint[]) => {
     if (!points || points.length === 0) return [] as { timestamp: string; count: number | null }[];
 
@@ -337,39 +271,23 @@ export default function Home() {
   const hour = 60 * minute;
   const day = 24 * hour;
 
-  // Choose bucket size based on span. Use finer resolution for short spans.
-  // For long spans ("All time") compute a bucket size that targets a reasonable
-  // number of points (so we don't end up with only one point per day). We pick
-  // a target number of points and compute an approximate bucket size, then
-  // enforce sensible minimums (at least 1 hour) to avoid excessive points.
-  let bucketMs = hour; // default 1 hour
+  let bucketMs = hour;
   if (span <= hour) {
-    // within 1h -> 1 minute buckets
     bucketMs = minute;
   } else if (span <= day) {
-    // within 24h -> 10 minute buckets
     bucketMs = 10 * minute;
   } else if (span <= 7 * day) {
-    // within 7d -> hourly buckets
     bucketMs = hour;
   } else {
-    // For longer spans (all-time), choose bucket to target a fixed number of points.
-    // This gives more granularity than one-per-day for multi-week ranges.
-    const TARGET_POINTS = 240; // aim for ~240 points on the chart
+    const TARGET_POINTS = 240;
     const approx = Math.ceil(span / TARGET_POINTS);
 
-    // Don't create buckets smaller than 1 hour (avoid very dense data), but allow
-    // sub-day buckets (e.g., 4h, 12h) so multi-week spans show more than one point/day.
     bucketMs = Math.max(approx, hour);
 
-    // Round bucketMs to a near "nice" interval (hours or days) for cleaner buckets
-    // Convert to hours for easier rounding
     const approxHours = Math.round(bucketMs / hour);
     if (approxHours <= 24) {
-      // round to nearest whole hour
       bucketMs = approxHours * hour;
     } else {
-      // for very long buckets, round to nearest day
       const approxDays = Math.max(1, Math.round(approxHours / 24));
       bucketMs = approxDays * day;
     }
@@ -382,15 +300,12 @@ export default function Home() {
       const bucketStart = t;
       const bucketEnd = t + bucketMs;
 
-      // advance j past any points before this bucket
       while (j < points.length && new Date(points[j].timestamp).getTime() < bucketStart) j += 1;
 
-      // if there's a point within [bucketStart, bucketEnd) use it; otherwise null
       if (j < points.length) {
         const ptTs = new Date(points[j].timestamp).getTime();
         if (ptTs >= bucketStart && ptTs < bucketEnd) {
           resampled.push({ timestamp: new Date(bucketStart).toISOString(), count: points[j].count });
-          // consume this point
           j += 1;
           continue;
         }
@@ -403,13 +318,10 @@ export default function Home() {
   };
 
   const resampled = resampleTimeSeries(filteredData);
-  // chartData uses index for even spacing but comes from resampled series to avoid spikes
   const chartData = resampled.map((d, i) => ({ ...d, index: i }));
 
-  // Helper to interpolate a value at an index when the bucket is null
   const interpolateAtIndex = (idx: number) => {
     const i = Math.floor(idx);
-    // find previous non-null
     let left = i - 1;
     while (left >= 0 && (chartData[left].count === null || chartData[left].count === undefined)) left -= 1;
     let right = i + 1;
@@ -422,7 +334,6 @@ export default function Home() {
     if (leftVal === null) return rightVal;
     if (rightVal === null) return leftVal;
 
-    // linear interpolate by index distance
     const t = (i - left) / (right - left);
     return Math.round(leftVal + (rightVal - leftVal) * t);
   };
@@ -431,7 +342,7 @@ export default function Home() {
     <SkeletonTheme baseColor="#374151" highlightColor="#4b5563">
       <div className="min-h-screen p-4 md:p-8 bg-gradient-to-br from-slate-50 to-slate-100 dark:from-gray-900 dark:to-gray-800">
         <main className="w-full mx-auto max-w-7xl">
-          {/* Enhanced Header */}
+          {/* header */}
           <div className="p-8 mb-8 bg-white border border-gray-200 shadow-md hover:shadow-lg dark:bg-gray-800 rounded-2xl dark:border-gray-700">
             <div className="flex flex-row items-center">
               <div className='flex flex-col justify-between w-full'>
@@ -456,21 +367,20 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Goal reached panel */}
+          {/* goal reached panel */}
           {currentCount >= TARGET_SIGNUPS && (
             <div className="p-6 mb-6 bg-green-50 border border-green-200 rounded-2xl dark:bg-green-900/20 dark:border-green-800">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-4xl font-bold text-green-800 dark:text-green-200">Goal reached</h2>
-                  <p className="mt-2 text-xl text-green-700 dark:text-green-100">Moonshot has launched!</p>
+                  <p className="mt-2 text-xl text-green-700 dark:text-green-100">Moonshot will be launching soon!</p>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Main Stats Grid */}
+          {/* main stats grid */}
           <div className="grid grid-cols-1 gap-6 mb-6 lg:grid-cols-3">
-            {/* Current Count - Hero Card */}
             <div className="p-8 bg-white border border-gray-200 shadow-md hover:shadow-lg lg:col-span-2 dark:bg-gray-800 rounded-2xl dark:border-gray-700">
               <div className="text-center">
                 <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">Current signups</p>
@@ -478,7 +388,7 @@ export default function Home() {
                   <Odometer value={currentCount} format="d" duration={2000} />
                 </div>
 
-                {/* Progress Bar */}
+                {/* progress Bar */}
                 <div className="w-full h-10 mb-3 overflow-hidden bg-gray-200 rounded-full dark:bg-gray-700">
                   <div
                     className="flex text-white items-center justify-end h-10 pr-1 transition-all ease-out bg-blue-600 rounded-lg duration-2000 md:pr-2"
@@ -495,13 +405,13 @@ export default function Home() {
 
                 <div className="pt-8 border-t border-gray-200 dark:border-gray-700">
                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {loading ? <Skeleton width={200}/> : (lastUpdated.startsWith('Last updated:') ? lastUpdated : `Updated ${lastUpdated}`)}
+                    {loading ? <Skeleton width={200}/> : "Updated " + lastUpdated}
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* Prediction Card */}
+            {/* prediction card */}
             <SkeletonTheme baseColor='#cbd5e1' highlightColor='#e2e8f0'>
               <div className="p-8 text-white shadow-md hover:shadow-lg bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-700 dark:to-blue-800 rounded-2xl">
                 <div className="mb-4">
@@ -524,7 +434,7 @@ export default function Home() {
             </SkeletonTheme>
           </div>
 
-          {/* Detailed Stats Grid */}
+          {/* detailed stats grid */}
           <div className="grid grid-cols-2 gap-6 mb-6 lg:grid-cols-4">
             <div className="p-6 transition-shadow bg-white border border-gray-200 shadow-md dark:bg-gray-800 rounded-xl dark:border-gray-700 hover:shadow-lg">
               <p className="mb-3 text-xs font-semibold tracking-widest text-gray-500 uppercase dark:text-gray-400">Last 24 hours</p>
@@ -560,7 +470,7 @@ export default function Home() {
           </div>
         
 
-          {/* Chart Card */}
+          {/* chart card */}
           <div className="p-2 bg-white border border-gray-200 shadow-md hover:shadow-lg md:p-8 dark:bg-gray-800 rounded-2xl dark:border-gray-700">
             <div className="flex flex-col gap-4 p-4 mb-6 border-b border-gray-200 md:p-0 md:pb-8 md:flex-row md:items-center md:justify-between dark:border-gray-700">
               <div>
@@ -570,7 +480,7 @@ export default function Home() {
               </div>
 
               <div className="flex items-center gap-3">
-                {/* Time Range Filter */}
+                {/* time range filter */}
                 <div className="flex p-1 bg-gray-100 rounded-lg dark:bg-gray-700">
                   <button
                     onClick={() => setTimeRange('1h')}
@@ -602,6 +512,7 @@ export default function Home() {
                     }`}
                   >
                     7 days
+
                   </button>
                   <button
                     onClick={() => setTimeRange('all')}
@@ -637,7 +548,7 @@ export default function Home() {
                       tickFormatter={(idx) => {
                         const i = Number(idx);
                         const point = chartData[i];
-                        // For compact X axis ticks use time only, but show full date in tooltip.
+                        // for compact X axis ticks use time only, but show full date in tooltip
                         return point ? formatTime(point.timestamp) : '';
                       }}
                       tick={{ fill: '#6b7280', fontSize: 11 }}
@@ -650,14 +561,12 @@ export default function Home() {
                     
                     <Tooltip
                       labelFormatter={(label) => {
-                        // label is the index; map back to timestamp and show full date/time
                         const i = Number(label);
                         const p = chartData[i];
                         return p ? formatDate(new Date(p.timestamp)) : '';
                       }}
                       formatter={(value: unknown, name: unknown, props: unknown) => {
                         if (value === null || value === undefined) {
-                          // props.label is the index
                           const p = props as { label?: number } | undefined;
                           const idx = Number(p?.label ?? NaN);
                           const interp = interpolateAtIndex(idx);
@@ -701,7 +610,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Additional Info Section */}
+          {/* additional info section */}
           <div className="p-6 mt-6 bg-white border border-gray-200 shadow-md hover:shadow-lg dark:bg-gray-800 rounded-2xl dark:border-gray-700">
               <h3 className="mb-4 text-lg font-bold text-gray-900 dark:text-white">Details</h3>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
