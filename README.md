@@ -1,46 +1,12 @@
 # Moonshot Signup Counter
 
-A real-time analytics dashboard for tracking Moonshot signup counts with comprehensive growth projections and historical trend analysis.
+A real-time analytics dashboard for tracking Moonshot signup counts.
 
 ![Dashboard Preview](https://img.shields.io/badge/Next.js-15.5-black?style=for-the-badge&logo=next.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue?style=for-the-badge&logo=typescript)
 ![TailwindCSS](https://img.shields.io/badge/Tailwind-4.0-38bdf8?style=for-the-badge&logo=tailwindcss)
 
-## 🛠️ Features
-
-### Real-Time Analytics
-- **Live Signup Counter** - Displays current signup count with automatic refresh every 60 seconds
-- **Signup history & Analytics** - Browse a timestamped history of signup records along with analytics on the history
-- **Progress Tracking** - Visual progress bar showing percentage towards the signup goal of 5000 people
-- **Goal Projection** - Estimation of goal completion date based on current growth rate
-
-## 📊 How It Works
-
-This project collects timestamped signup counts, stores them in Supabase, and exposes them to a Next.js frontend for realtime display and analytics. The overall flow is:
-
-- Data collection: a Supabase Edge Function (see `supabase/functions/signup-count-fetcher.ts`) runs on a cron schedule (recommended: every minute). It reads the latest signup total from your source (or computes the delta) and inserts a new row into the `signups` table with the shape: `id` (int8), `count` (int8), `timestamp` (timestamptz).
-
-- Storage & realtime: the `signups` table stores a history of counts. Supabase Realtime and policies are enabled so the frontend can either poll or subscribe to changes.
-
-- Frontend (Next.js): the app in `app/` loads the latest signup record and a history of recent records. The live counter updates automatically (default: refresh/poll every 60s) and can also use Supabase realtime subscriptions to push updates instantly.
-
-- Analytics & projections: the client computes growth metrics from the historical data (e.g., recent growth rate), renders charts (Recharts), shows a progress bar toward the goal (default goal: 5000 signups), and displays a simple projection for the estimated goal completion date based on current trends.
-
-- Deployment: when deploying (Vercel or similar) provide the environment variables `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. The edge function requires a service-role key for the cron job POST request.
-
-Notes:
-- The edge function file is at `supabase/functions/signup-count-fetcher.ts` in this repo — look there for how counts are fetched and inserted.
-- Ensure the `signups` table has a permissive read policy (or configure RLS appropriately) so the public frontend can read the data.
-- Polling interval and goal value are configurable in the frontend source if you want faster updates or a different goal.
-
-## 🚀 Run locally
-
-### Prerequisites
-- Node.js 20+ and npm
-- Git
-- Supabase account (free tier available)
-
-### Installation
+## Run locally
 
 1. **Clone the repository**
 ```bash
@@ -78,34 +44,7 @@ npm run dev
 
 Open http://localhost:3000 with your browser.
 
-## 🌐 Deployment
 
-### Vercel (recommended)
-1. Push your code to GitHub
-2. Import project in [Vercel](https://vercel.com)
-3. Add environment variables in project settings:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-4. Deploy with one click
-5. Automatic deployments on every push
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 🙏 Acknowledgments
-
-- Built with [Next.js](https://nextjs.org/)
-- Database powered by [Supabase](https://supabase.com/)
-- Charts powered by [Recharts](https://recharts.org/)
-- Styled with [Tailwind CSS](https://tailwindcss.com/)
-
-## 📄 License
+## License
 
 This project is licensed under the MIT license.
